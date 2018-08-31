@@ -1985,15 +1985,11 @@ clang::QualType ClangASTSource::CopyTypeWithMerger(
 
   Expected<QualType> ImportResult = 
       merger.ImporterForOrigin(from_context).Import(type);
-  if (ImportResult)
-    return *ImportResult;
-  else
-    handleAllErrors(
-        ImportResult.takeError(),
-        [](const ImportError &Error) {
-          // FIXME: Handle the error.
-        });
+  if (!ImportResult) {
+    llvm::consumeError(ImportResult.takeError());
     return QualType();
+  }
+  return *ImportResult;
 }
 
 clang::Decl *ClangASTSource::CopyDecl(Decl *src_decl) {

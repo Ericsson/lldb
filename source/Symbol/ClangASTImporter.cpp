@@ -61,11 +61,7 @@ clang::QualType ClangASTImporter::CopyType(clang::ASTContext *dst_ast,
     if (auto result = minion_sp->Import(type))
       return *result;
     else
-      handleAllErrors(
-          result.takeError(),
-          [](const ImportError &err) {
-            // FIXME: Handle error?
-          });
+      consumeError(result.takeError());
   }
 
   return QualType();
