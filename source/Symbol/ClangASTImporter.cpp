@@ -57,8 +57,12 @@ clang::QualType ClangASTImporter::CopyType(clang::ASTContext *dst_ast,
                                            clang::QualType type) {
   MinionSP minion_sp(GetMinion(dst_ast, src_ast));
 
-  if (minion_sp)
-    return minion_sp->Import(type);
+  if (minion_sp) {
+    if (auto result = minion_sp->Import(type))
+      return *result;
+    else
+      consumeError(result.takeError());
+  }
 
   return QualType();
 }
@@ -99,12 +103,15 @@ clang::Decl *ClangASTImporter::CopyDecl(clang::ASTContext *dst_ast,
   minion_sp = GetMinion(dst_ast, src_ast);
 
   if (minion_sp) {
-    clang::Decl *result = minion_sp->Import(decl);
+    llvm::Expected<clang::Decl *> result = minion_sp->Import(decl);
 
     if (!result) {
+      llvm::consumeError(result.takeError());
+
       Log *log(lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS));
 
       if (log) {
+        
         lldb::user_id_t user_id = LLDB_INVALID_UID;
         ClangASTMetadata *metadata = GetDeclMetadata(decl);
         if (metadata)
@@ -120,9 +127,11 @@ clang::Decl *ClangASTImporter::CopyDecl(clang::ASTContext *dst_ast,
                       "metadata 0x%" PRIx64,
                       decl->getDeclKindName(), user_id);
       }
+
+      return nullptr;
     }
 
-    return result;
+    return *result;
   }
 
   return nullptr;
@@ -888,7 +897,10 @@ void ClangASTImporter::Minion::ImportDefinitionTo(clang::Decl *to,
       to_cxx_record->startDefinition();
   */
 
-  ImportDefinition(from);
+  llvm::Error Err = ImportDefinition(from);
+  // Ignore the error.
+  if (Err)
+    llvm::consumeError(std::move(Err));
 
   if (clang::TagDecl *to_tag = dyn_cast<clang::TagDecl>(to)) {
     if (clang::TagDecl *from_tag = dyn_cast<clang::TagDecl>(from)) {
@@ -918,10 +930,12 @@ void ClangASTImporter::Minion::ImportDefinitionTo(clang::Decl *to,
       if (!from_superclass)
         break;
 
-      Decl *imported_from_superclass_decl = Import(from_superclass);
-
-      if (!imported_from_superclass_decl)
+      Decl *imported_from_superclass_decl;
+      if (llvm::Error err = importInto<clang::Decl *>(
+              imported_from_superclass_decl, from_superclass)) {
+        llvm::consumeError(std::move(err));
         break;
+      }
 
       ObjCInterfaceDecl *imported_from_superclass =
           dyn_cast<ObjCInterfaceDecl>(imported_from_superclass_decl);

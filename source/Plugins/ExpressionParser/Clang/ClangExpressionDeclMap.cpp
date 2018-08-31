@@ -272,7 +272,10 @@ static clang::QualType ExportAllDeclaredTypes(
   merger.AddSources(importer_source);
   clang::ASTImporter &exporter = merger.ImporterForOrigin(source);
   CompleteAllDeclContexts(exporter, file, root);
-  clang::QualType ret = exporter.Import(root);
+  clang::QualType ret;
+  if (llvm::Error Err = exporter.importInto(ret, root))
+    // Import failed, use empty type, do not care about error.
+    llvm::consumeError(std::move(Err));
   merger.RemoveSources(importer_source);
   return ret;
 }
