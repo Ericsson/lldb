@@ -237,7 +237,7 @@ private:
 public:
   Completer(clang::ASTImporter &exporter, clang::FileID file)
       : m_exporter(exporter), m_file(file) {}
-  
+
   // Implements the RecursiveASTVisitor's core API.  It is called on each Decl
   // that the RecursiveASTVisitor encounters, and returns true if the traversal
   // should continue.
@@ -272,9 +272,14 @@ static clang::QualType ExportAllDeclaredTypes(
   merger.AddSources(importer_source);
   clang::ASTImporter &exporter = merger.ImporterForOrigin(source);
   CompleteAllDeclContexts(exporter, file, root);
-  clang::QualType ret = exporter.Import(root);
+  llvm::Expected<clang::QualType> ret_or_error = exporter.Import(root);
   merger.RemoveSources(importer_source);
-  return ret;
+  if (ret_or_error)
+    return *ret_or_error;
+  else {
+    llvm::consumeError(ret_or_error.takeError());
+    return clang::QualType();
+  }
 }
 
 TypeFromUser ClangExpressionDeclMap::DeportType(ClangASTContext &target,
@@ -283,7 +288,7 @@ TypeFromUser ClangExpressionDeclMap::DeportType(ClangASTContext &target,
   assert (&target == m_target->GetScratchClangASTContext());
   assert ((TypeSystem*)&source == parser_type.GetTypeSystem());
   assert (source.getASTContext() == m_ast_context);
-  
+
   if (m_ast_importer_sp) {
     return TypeFromUser(m_ast_importer_sp->DeportType(
                             target.getASTContext(), source.getASTContext(),
@@ -822,7 +827,7 @@ void ClangExpressionDeclMap::FindExternalVisibleDecls(
       log->Printf("  CEDM::FEVD[%u] Inspecting (NamespaceMap*)%p (%d entries)",
                   current_id, static_cast<void *>(namespace_map.get()),
                   (int)namespace_map->size());
-    
+
     for (ClangASTImporter::NamespaceMap::iterator i = namespace_map->begin(),
                                                   e = namespace_map->end();
          i != e; ++i) {
@@ -842,7 +847,7 @@ void ClangExpressionDeclMap::FindExternalVisibleDecls(
     FindExternalVisibleDecls(context, lldb::ModuleSP(), namespace_decl,
                              current_id);
   }
-  
+
   ClangASTSource::FindExternalVisibleDecls(context);
 }
 
@@ -1979,18 +1984,18 @@ void ClangExpressionDeclMap::AddOneFunction(NameSearchContext &context,
           if (copied_function_template) {
             if (log) {
               ASTDumper ast_dumper((clang::Decl *)copied_function_template);
-              
+
               StreamString ss;
-              
+
               function->DumpSymbolContext(&ss);
-              
+
               log->Printf("  CEDM::FEVD[%u] Imported decl for function template"
                           " %s (description %s), returned %s",
                           current_id,
                           copied_function_template->getNameAsString().c_str(),
                           ss.GetData(), ast_dumper.GetCString());
             }
-            
+
             context.AddNamedDecl(copied_function_template);
           }
         } else if (src_function_decl) {

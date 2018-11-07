@@ -1220,7 +1220,12 @@ clang::Decl *ClangASTContext::CopyDecl(ASTContext *dst_ast, ASTContext *src_ast,
   FileManager file_manager(file_system_options);
   ASTImporter importer(*dst_ast, file_manager, *src_ast, file_manager, false);
 
-  return importer.Import(source_decl);
+  if (llvm::Expected<clang::Decl *> ret_or_error = importer.Import(source_decl))
+    return *ret_or_error;
+  else {
+    llvm::consumeError(ret_or_error.takeError());
+    return nullptr;
+  }
 }
 
 bool ClangASTContext::AreTypesSame(CompilerType type1, CompilerType type2,

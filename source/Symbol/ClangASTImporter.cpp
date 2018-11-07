@@ -57,8 +57,12 @@ clang::QualType ClangASTImporter::CopyType(clang::ASTContext *dst_ast,
                                            clang::QualType type) {
   MinionSP minion_sp(GetMinion(dst_ast, src_ast));
 
-  if (minion_sp)
-    return minion_sp->Import(type);
+  if (minion_sp) {
+    if (llvm::Expected<QualType> ret_or_error = minion_sp->Import(type))
+      return *ret_or_error;
+    else
+      llvm::consumeError(ret_or_error.takeError());
+  }
 
   return QualType();
 }
@@ -99,7 +103,7 @@ clang::Decl *ClangASTImporter::CopyDecl(clang::ASTContext *dst_ast,
   minion_sp = GetMinion(dst_ast, src_ast);
 
   if (minion_sp) {
-    clang::Decl *result = minion_sp->Import(decl);
+    llvm::Expected<clang::Decl *> result = minion_sp->Import(decl);
 
     if (!result) {
       Log *log(lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS));
@@ -120,9 +124,14 @@ clang::Decl *ClangASTImporter::CopyDecl(clang::ASTContext *dst_ast,
                       "metadata 0x%" PRIx64,
                       decl->getDeclKindName(), user_id);
       }
+
+      // FIXME: Include error information in log message.
+      llvm::consumeError(result.takeError());
+
+      return nullptr;
     }
 
-    return result;
+    return *result;
   }
 
   return nullptr;
@@ -916,13 +925,15 @@ void ClangASTImporter::Minion::ImportDefinitionTo(clang::Decl *to,
       if (!from_superclass)
         break;
 
-      Decl *imported_from_superclass_decl = Import(from_superclass);
+      llvm::Expected<Decl *> imported_from_superclass_decl = Import(from_superclass);
 
-      if (!imported_from_superclass_decl)
+      if (!imported_from_superclass_decl) {
+        llvm::consumeError(imported_from_superclass_decl.takeError());
         break;
+      }
 
       ObjCInterfaceDecl *imported_from_superclass =
-          dyn_cast<ObjCInterfaceDecl>(imported_from_superclass_decl);
+          dyn_cast<ObjCInterfaceDecl>(*imported_from_superclass_decl);
 
       if (!imported_from_superclass)
         break;

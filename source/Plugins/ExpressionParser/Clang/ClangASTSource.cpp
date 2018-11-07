@@ -1982,7 +1982,13 @@ clang::QualType ClangASTSource::CopyTypeWithMerger(
     return QualType();
   }
 
-  return merger.ImporterForOrigin(from_context).Import(type);
+  llvm::Expected<QualType> type_or_error = merger.ImporterForOrigin(from_context).Import(type);
+  if (!type_or_error) {
+    lldbassert(0 && "Couldn't import a type!");
+    llvm::consumeError(type_or_error.takeError());
+    return QualType();
+  }
+  return *type_or_error;
 }
 
 clang::Decl *ClangASTSource::CopyDecl(Decl *src_decl) {
@@ -1995,7 +2001,13 @@ clang::Decl *ClangASTSource::CopyDecl(Decl *src_decl) {
       return nullptr;
     }
 
-    return m_merger_up->ImporterForOrigin(from_context).Import(src_decl);
+    llvm::Expected<Decl *> decl_or_error = m_merger_up->ImporterForOrigin(from_context).Import(src_decl);
+    if (!decl_or_error) {
+      lldbassert(0 && "Couldn't import a decl!");
+      llvm::consumeError(decl_or_error.takeError());
+      return nullptr;
+    }
+    return *decl_or_error;
   } else {
     lldbassert(0 && "No mechanism for copying a decl!");
     return nullptr;
