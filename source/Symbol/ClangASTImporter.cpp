@@ -57,10 +57,18 @@ clang::QualType ClangASTImporter::CopyType(clang::ASTContext *dst_ast,
                                            clang::QualType type) {
   MinionSP minion_sp(GetMinion(dst_ast, src_ast));
 
-  if (minion_sp)
-    return minion_sp->Import(type);
+  if (!minion_sp)
+    return QualType();
 
-  return QualType();
+  llvm::Expected<QualType> ret_or_error = minion_sp->Import(type);
+  if (!ret_or_error) {
+    Log *log =
+      lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS);
+    LLDB_LOG_ERROR(log, ret_or_error.takeError(),
+        "Couldn't import type: {0}");
+    return QualType();
+  }
+  return *ret_or_error;
 }
 
 lldb::opaque_compiler_type_t
@@ -98,34 +106,33 @@ clang::Decl *ClangASTImporter::CopyDecl(clang::ASTContext *dst_ast,
 
   minion_sp = GetMinion(dst_ast, src_ast);
 
-  if (minion_sp) {
-    clang::Decl *result = minion_sp->Import(decl);
+  if (!minion_sp)
+    return nullptr;
 
-    if (!result) {
-      Log *log(lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS));
+  llvm::Expected<clang::Decl *> result = minion_sp->Import(decl);
+  if (!result) {
+    Log *log(lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS));
+    LLDB_LOG_ERROR(log, result.takeError(), "Couldn't import decl: {0}");
+    if (log) {
+      lldb::user_id_t user_id = LLDB_INVALID_UID;
+      ClangASTMetadata *metadata = GetDeclMetadata(decl);
+      if (metadata)
+        user_id = metadata->GetUserID();
 
-      if (log) {
-        lldb::user_id_t user_id = LLDB_INVALID_UID;
-        ClangASTMetadata *metadata = GetDeclMetadata(decl);
-        if (metadata)
-          user_id = metadata->GetUserID();
-
-        if (NamedDecl *named_decl = dyn_cast<NamedDecl>(decl))
-          log->Printf("  [ClangASTImporter] WARNING: Failed to import a %s "
-                      "'%s', metadata 0x%" PRIx64,
-                      decl->getDeclKindName(),
-                      named_decl->getNameAsString().c_str(), user_id);
-        else
-          log->Printf("  [ClangASTImporter] WARNING: Failed to import a %s, "
-                      "metadata 0x%" PRIx64,
-                      decl->getDeclKindName(), user_id);
-      }
+      if (NamedDecl *named_decl = dyn_cast<NamedDecl>(decl))
+        log->Printf("  [ClangASTImporter] WARNING: Failed to import a %s "
+                    "'%s', metadata 0x%" PRIx64,
+                    decl->getDeclKindName(),
+                    named_decl->getNameAsString().c_str(), user_id);
+      else
+        log->Printf("  [ClangASTImporter] WARNING: Failed to import a %s, "
+                    "metadata 0x%" PRIx64,
+                    decl->getDeclKindName(), user_id);
     }
-
-    return result;
+    return nullptr;
   }
 
-  return nullptr;
+  return *result;
 }
 
 class DeclContextOverride {
@@ -613,6 +620,8 @@ bool ClangASTImporter::CompleteAndFetchChildren(clang::QualType type) {
   if (!RequireCompleteType(type))
     return false;
 
+  Log *log = lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS);
+
   if (const TagType *tag_type = type->getAs<TagType>()) {
     TagDecl *tag_decl = tag_type->getDecl();
 
@@ -626,7 +635,13 @@ bool ClangASTImporter::CompleteAndFetchChildren(clang::QualType type) {
     TagDecl *origin_tag_decl = llvm::dyn_cast<TagDecl>(decl_origin.decl);
 
     for (Decl *origin_child_decl : origin_tag_decl->decls()) {
-      minion_sp->Import(origin_child_decl);
+      llvm::Expected<Decl *> imported_or_err =
+          minion_sp->Import(origin_child_decl);
+      if (!imported_or_err) {
+        LLDB_LOG_ERROR(log, imported_or_err.takeError(),
+                       "Couldn't import decl: {0}");
+        return false;
+      }
     }
 
     if (RecordDecl *record_decl = dyn_cast<RecordDecl>(origin_tag_decl)) {
@@ -651,7 +666,13 @@ bool ClangASTImporter::CompleteAndFetchChildren(clang::QualType type) {
           llvm::dyn_cast<ObjCInterfaceDecl>(decl_origin.decl);
 
       for (Decl *origin_child_decl : origin_interface_decl->decls()) {
-        minion_sp->Import(origin_child_decl);
+        llvm::Expected<Decl *> imported_or_err =
+            minion_sp->Import(origin_child_decl);
+        if (!imported_or_err) {
+          LLDB_LOG_ERROR(log, imported_or_err.takeError(),
+                         "Couldn't import decl: {0}");
+          return false;
+        }
       }
 
       return true;
@@ -886,7 +907,13 @@ void ClangASTImporter::Minion::ImportDefinitionTo(clang::Decl *to,
       to_cxx_record->startDefinition();
   */
 
-  ImportDefinition(from);
+  Log *log = lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS);
+
+  if (llvm::Error err = ImportDefinition(from)) {
+    LLDB_LOG_ERROR(log, std::move(err),
+                   "[ClangASTImporter] Error during importing definition: {0}");
+    return;
+  }
 
   if (clang::TagDecl *to_tag = dyn_cast<clang::TagDecl>(to)) {
     if (clang::TagDecl *from_tag = dyn_cast<clang::TagDecl>(from)) {
@@ -916,13 +943,17 @@ void ClangASTImporter::Minion::ImportDefinitionTo(clang::Decl *to,
       if (!from_superclass)
         break;
 
-      Decl *imported_from_superclass_decl = Import(from_superclass);
+      llvm::Expected<Decl *> imported_from_superclass_decl =
+          Import(from_superclass);
 
-      if (!imported_from_superclass_decl)
+      if (!imported_from_superclass_decl) {
+        LLDB_LOG_ERROR(log, imported_from_superclass_decl.takeError(),
+                       "Couldn't import decl: {0}");
         break;
+      }
 
       ObjCInterfaceDecl *imported_from_superclass =
-          dyn_cast<ObjCInterfaceDecl>(imported_from_superclass_decl);
+          dyn_cast<ObjCInterfaceDecl>(*imported_from_superclass_decl);
 
       if (!imported_from_superclass)
         break;
@@ -936,7 +967,7 @@ void ClangASTImporter::Minion::ImportDefinitionTo(clang::Decl *to,
   }
 }
 
-clang::Decl *ClangASTImporter::Minion::Imported(clang::Decl *from,
+void ClangASTImporter::Minion::Imported(clang::Decl *from,
                                                 clang::Decl *to) {
   ClangASTMetrics::RegisterClangImport();
 
@@ -1095,8 +1126,6 @@ clang::Decl *ClangASTImporter::Minion::Imported(clang::Decl *from,
       }
     }
   }
-
-  return clang::ASTImporter::Imported(from, to);
 }
 
 clang::Decl *ClangASTImporter::Minion::GetOriginalDecl(clang::Decl *To) {
